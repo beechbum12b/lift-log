@@ -74,6 +74,9 @@ select,input[type=number],input[type=text]{background:var(--input);border:1px so
 .sets .t{font-size:.9rem}
 .sets .t.drop{color:var(--red);font-weight:600}
 .sets input{padding:10px 8px;text-align:center;font-size:1.05rem}
+.sets .sw{display:block;font-size:.82rem;color:var(--blue);font-weight:600}
+.note.up{color:var(--blue)}
+.fill{margin-top:10px;background:none;border:1px solid var(--line);border-radius:8px;padding:8px 12px;font-size:.9rem;color:var(--blue);font-weight:600}
 
 .cardio{background:var(--blue-soft);border-radius:10px;padding:14px;margin:18px 0 12px}
 .cardio h3{font-size:1.35rem}
@@ -142,7 +145,7 @@ textarea{width:100%;background:var(--input);border:1px solid var(--line);border-
       </section>
       <section>
         <h3>1-rep maxes and units</h3>
-        <p>Enter these to see target weights for bench, squat and deadlift. No tested max? Use weight × (1 + reps ÷ 30) from a recent hard set.</p>
+        <p>Enter these to get exact targets for bench, squat and deadlift. Everything else is suggested from your last logged session, so log your first week honestly and the suggestions sharpen from there. No tested max? Use weight × (1 + reps ÷ 30) from a recent hard set.</p>
         <div class="grid3">
           <label>Bench<input type="number" inputmode="decimal" id="rm-bench"></label>
           <label>Squat<input type="number" inputmode="decimal" id="rm-squat"></label>
@@ -305,6 +308,52 @@ function fmtSets(sets, units){
 }
 function fmtDate(ts){ return new Date(ts).toLocaleDateString(undefined,{weekday:"short",month:"short",day:"numeric"}); }
 
+/* ---------- Suggestions ---------- */
+// Reps left in the tank each week (week 5 = deload). Used both to read past sets and to plan new ones.
+var RIR = [3, 2, 1.5, 0.5, 3];
+function repTarget(r){
+  var m=/^(\d+)(?:\s*[–-]\s*(\d+))?/.exec(String(r));
+  if(!m) return null;
+  var lo=+m[1], hi=m[2]?+m[2]:lo;
+  return Math.floor((lo+hi)/2);
+}
+function convert(w, from, to){
+  if(!from || from===to) return w;
+  return from==="lb" ? w/2.2046 : w*2.2046;
+}
+// Estimated 1RM from a logged session: Epley, counting the reps that were left in the tank that week.
+function e1rmFrom(last){
+  if(!last) return null;
+  var rir = RIR[last.s.week]!=null ? RIR[last.s.week] : 2, best=0;
+  (last.e.sets||[]).forEach(function(s){
+    var w=parseFloat(s.w), r=parseFloat(s.r);
+    if(w>0 && r>0 && r<=30){ var est=w*(1+(r+rir)/30); if(est>best) best=est; }
+  });
+  return best>0 ? convert(best, last.s.units, state.units) : null;
+}
+function suggestFor(ex, last){
+  // returns {base, source, weights:[...]} or null
+  if(ex.bw || ex.id==="pullup") return null;
+  var reps=setsFor(ex), est=e1rmFrom(last), base=null, source="";
+  if(ex.main){
+    var stored=parseFloat(state.rm[ex.rm]);
+    if(stored>0){ base=stored; source="max"; }
+    else if(est){ base=est; source="est"; }
+    if(!base) return null;
+    var p=MAIN[ex.main][state.week].p;
+    var w=roundW(base*p/100);
+    return { base:base, source:source, est:est, weights:reps.map(function(){ return w; }) };
+  }
+  if(!est) return null;
+  var rir=RIR[state.week];
+  return { base:est, source:"est", est:est, weights:reps.map(function(r){
+    var R=repTarget(r); if(R==null) return null;
+    var w=est/(1+(R+rir)/30);
+    if(state.week===4) w*=0.9;
+    return Math.max(roundW(w), state.units==="kg"?2.5:5);
+  }) };
+}
+
 /* ---------- Draft ---------- */
 function draftKey(){ return pk("draft:"+state.week+":"+state.day); }
 function readForm(){
@@ -343,35 +392,55 @@ function renderWorkout(){
     var h=el("h3",{text:ex.n}); if(ex.ss) h.appendChild(el("span",{cls:"tag",text:"Superset "+ex.ss}));
     card.appendChild(h);
     var noteTxt = ex.note||"";
-    var target = null;
+    var last=lastFor(ex.id);
+    var sug=suggestFor(ex,last);
     if(ex.main){
       var m=MAIN[ex.main][state.week];
-      var rm=parseFloat(state.rm[ex.rm]);
-      if(rm>0){ target=roundW(rm*m.p/100); noteTxt = m.s+" × "+m.r+" @ "+m.p+"% = "+target+" "+state.units+". "+noteTxt; }
-      else noteTxt = m.s+" × "+m.r+" @ "+m.p+"% of your max (add your max in Settings). "+noteTxt;
+      if(sug) noteTxt = m.s+" × "+m.r+" @ "+m.p+"% of "+(sug.source==="max"?"your ":"an estimated ")+Math.round(sug.base)+" "+state.units+" max. "+noteTxt;
+      else noteTxt = m.s+" × "+m.r+" @ "+m.p+"% of your max. Add your max in Settings, or log once to get an estimate. "+noteTxt;
     }
     if(noteTxt) card.appendChild(el("p",{cls:"note",text:noteTxt}));
-    var last=lastFor(ex.id);
+    if(ex.main && sug && sug.source==="max" && sug.est && sug.est>sug.base*1.03){
+      card.appendChild(el("p",{cls:"note up",text:"Your last session points to a max of about "+roundW(sug.est)+" "+state.units+". Consider updating it in Settings."}));
+    }
     if(last){
       var lp=el("p",{cls:"last"}); lp.appendChild(document.createTextNode("Last time ("+fmtDate(last.s.ts)+"): "));
       lp.appendChild(el("b",{text:fmtSets(last.e.sets, last.s.units)})); card.appendChild(lp);
     }
     var g=el("div",{cls:"sets"});
     ["Set","Target",(ex.bw||ex.id==="pullup"?"+ "+state.units:state.units),"Reps"].forEach(function(t){ g.appendChild(el("span",{cls:"h",text:t})); });
+    var weightInputs=[];
     reps.forEach(function(r,i){
       var prev = draft && draft.entries && draft.entries[xi] && draft.entries[xi].id===ex.id ? draft.entries[xi].sets[i] : null;
       var lastSet = last && last.e.sets[i];
+      var sw = sug ? sug.weights[i] : null;
       g.appendChild(el("span",{cls:"n",text:String(i+1)}));
-      g.appendChild(el("span",{cls:"t"+(/drop|partials/.test(r)?" drop":""),text:r}));
+      var tcell=el("span",{cls:"t"+(/drop|partials/.test(r)?" drop":"")},[document.createTextNode(r)]);
+      if(sw!=null){
+        var line = "@ "+sw+" "+state.units;
+        if(/drop/.test(r)) line += ", then "+roundW(sw*0.7);
+        tcell.appendChild(el("span",{cls:"sw",text:line}));
+      }
+      g.appendChild(tcell);
       var wi=el("input",{type:"number",inputmode:"decimal",step:"any",id:"w-"+ex.id+"-"+i,"aria-label":ex.n+" set "+(i+1)+" weight"});
-      wi.placeholder = target!=null ? String(target) : (lastSet && lastSet.w!=="" ? String(lastSet.w) : "");
+      wi.placeholder = sw!=null ? String(sw) : (lastSet && lastSet.w!=="" ? String(lastSet.w) : "");
       if(prev) wi.value=prev.w;
+      weightInputs.push({input:wi, w:sw});
       var ri=el("input",{type:"number",inputmode:"numeric",id:"r-"+ex.id+"-"+i,"aria-label":ex.n+" set "+(i+1)+" reps"});
       var m2=/^\d+/.exec(r); ri.placeholder = m2?m2[0]:"";
       if(prev) ri.value=prev.r;
       g.appendChild(wi); g.appendChild(ri);
     });
-    card.appendChild(g);
+    if(sug && sug.weights.some(function(w){ return w!=null; })){
+      var fill=el("button",{cls:"fill",type:"button",text:"Fill suggested weights"});
+      fill.addEventListener("click",function(){
+        weightInputs.forEach(function(o){ if(o.w!=null && o.input.value==="") o.input.value=o.w; });
+        saveDraft(); toast("Suggested weights filled in");
+      });
+      card.appendChild(g); card.appendChild(fill);
+      g=null;
+    }
+    if(g) card.appendChild(g);
     root.appendChild(card);
   });
 
