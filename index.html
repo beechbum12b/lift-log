@@ -40,7 +40,13 @@ button{cursor:pointer}
 header{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;background:var(--surface);border-bottom:1px solid var(--line)}
 .bar{max-width:680px;margin:0 auto;padding:10px 16px 0;display:flex;align-items:center;gap:12px}
 .bar h1{font-size:1.5rem;font-weight:800;letter-spacing:.01em;flex:1}
-.sync{font-size:.8rem;color:var(--muted)}
+.who{display:flex;align-items:center;gap:6px;font-size:.85rem;color:var(--muted)}
+.who select{width:auto;max-width:44vw;padding:7px 8px;font-weight:600;color:var(--ink)}
+.plist{display:grid;gap:8px;margin-bottom:10px}
+.prow{display:flex;gap:8px;align-items:center}
+.prow input{flex:1}
+.prow .cur{font-size:.8rem;color:var(--blue);font-weight:600;white-space:nowrap}
+.btnrow{display:flex;gap:8px;flex-wrap:wrap}
 nav{max-width:680px;margin:0 auto;display:flex;padding:0 8px}
 nav button{flex:1;background:none;border:0;padding:12px 4px 10px;font-weight:600;color:var(--muted);border-bottom:3px solid transparent}
 nav button[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--blue)}
@@ -111,7 +117,7 @@ textarea{width:100%;background:var(--input);border:1px solid var(--line);border-
 </head>
 <body>
 <header>
-  <div class="bar"><h1>Lift Log</h1><span class="sync" id="sync">Saved on this device</span></div>
+  <div class="bar"><h1>Lift Log</h1><label class="who">Lifting<select id="profile" aria-label="Who is lifting"></select></label></div>
   <nav role="tablist">
     <button role="tab" id="tab-log" aria-selected="true">Today</button>
     <button role="tab" id="tab-history" aria-selected="false">History</button>
@@ -135,7 +141,7 @@ textarea{width:100%;background:var(--input);border:1px solid var(--line);border-
         <div class="seg" id="units"><button data-u="lb">lb</button><button data-u="kg">kg</button></div>
       </section>
       <section>
-        <h3>1-rep maxes</h3>
+        <h3>1-rep maxes and units</h3>
         <p>Enter these to see target weights for bench, squat and deadlift. No tested max? Use weight × (1 + reps ÷ 30) from a recent hard set.</p>
         <div class="grid3">
           <label>Bench<input type="number" inputmode="decimal" id="rm-bench"></label>
@@ -143,6 +149,22 @@ textarea{width:100%;background:var(--input);border:1px solid var(--line);border-
           <label>Deadlift<input type="number" inputmode="decimal" id="rm-dead"></label>
         </div>
         <div style="margin-top:12px"><button class="btn ghost" id="save-settings">Save maxes</button></div>
+      </section>
+      <section>
+        <h3>People</h3>
+        <p>Each person has their own history, maxes and units. Switch between them with the menu at the top.</p>
+        <div class="plist" id="plist"></div>
+        <div class="btnrow"><input type="text" id="new-name" placeholder="Name" aria-label="New person’s name" style="flex:1;min-width:140px"><button class="btn ghost" id="add-person">Add person</button></div>
+      </section>
+      <section>
+        <h3>Backup</h3>
+        <p>Logs live only on this device. Export a backup now and then, and import it on a new phone to bring your history with you. Importing adds missing sessions and never deletes any.</p>
+        <div class="btnrow">
+          <button class="btn ghost" id="export">Export backup</button>
+          <button class="btn ghost" id="import-btn">Import backup</button>
+          <input type="file" id="import-file" accept=".json,application/json" hidden>
+        </div>
+        <p id="backup-info" style="margin:10px 0 0"></p>
       </section>
       <section>
         <h3>Add to your home screen</h3>
@@ -212,15 +234,43 @@ var DAYS = [
 
 /* ---------- State ---------- */
 var state = { week:0, day:0, units:"lb", rm:{}, sessions:[] };
-var mode = "local", db = null, uid = null;
+var profiles = { list:[], current:null };
 
 function lsGet(k,d){ try{ var v=localStorage.getItem(k); return v?JSON.parse(v):d; }catch(e){ return d; } }
 function lsSet(k,v){ try{ localStorage.setItem(k,JSON.stringify(v)); }catch(e){} }
 
-var pos = lsGet("ll:pos",{week:0,day:0}); state.week=pos.week||0; state.day=pos.day||0;
-var localSettings = lsGet("ll:settings",{units:"lb",rm:{}});
-state.units = localSettings.units||"lb"; state.rm = localSettings.rm||{};
-state.sessions = lsGet("ll:sessions",[]);
+function pk(k){ return "ll:p:"+profiles.current+":"+k; }
+function newId(){ return "p"+Date.now().toString(36)+Math.random().toString(36).slice(2,6); }
+function saveProfiles(){ lsSet("ll:profiles",profiles); }
+
+function loadProfiles(){
+  profiles = lsGet("ll:profiles",null);
+  if(!profiles || !profiles.list || !profiles.list.length){
+    // first run, or upgrading from the single-person version: move old data into a first profile
+    var id=newId();
+    profiles={ list:[{id:id,name:"Me"}], current:id };
+    var oldS=lsGet("ll:sessions",null), oldSet=lsGet("ll:settings",null), oldPos=lsGet("ll:pos",null);
+    if(oldS) lsSet("ll:p:"+id+":sessions",oldS);
+    if(oldSet) lsSet("ll:p:"+id+":settings",oldSet);
+    if(oldPos) lsSet("ll:p:"+id+":pos",oldPos);
+    try{
+      for(var i=localStorage.length-1;i>=0;i--){
+        var k=localStorage.key(i);
+        if(k && k.indexOf("ll:draft:")===0){ localStorage.setItem("ll:p:"+id+":"+k.slice(3), localStorage.getItem(k)); }
+      }
+    }catch(e){}
+    saveProfiles();
+  }
+  if(!profiles.list.some(function(p){ return p.id===profiles.current; })) profiles.current=profiles.list[0].id;
+}
+function loadCurrent(){
+  var pos=lsGet(pk("pos"),{week:0,day:0}); state.week=pos.week||0; state.day=pos.day||0;
+  var st=lsGet(pk("settings"),{units:"lb",rm:{}}); state.units=st.units||"lb"; state.rm=st.rm||{};
+  state.sessions=lsGet(pk("sessions"),[]);
+}
+function savePos(){ lsSet(pk("pos"),{week:state.week,day:state.day}); }
+loadProfiles();
+loadCurrent();
 
 /* ---------- Helpers ---------- */
 var $ = function(id){ return document.getElementById(id); };
@@ -256,7 +306,7 @@ function fmtSets(sets, units){
 function fmtDate(ts){ return new Date(ts).toLocaleDateString(undefined,{weekday:"short",month:"short",day:"numeric"}); }
 
 /* ---------- Draft ---------- */
-function draftKey(){ return "ll:draft:"+state.week+":"+state.day; }
+function draftKey(){ return pk("draft:"+state.week+":"+state.day); }
 function readForm(){
   var d=DAYS[state.day], entries=[];
   d.ex.forEach(function(ex){
@@ -380,59 +430,118 @@ function renderHistory(){
 function renderSettings(){
   Array.prototype.forEach.call($("units").children,function(b){ b.setAttribute("aria-pressed", b.dataset.u===state.units?"true":"false"); });
   $("rm-bench").value=state.rm.bench||""; $("rm-squat").value=state.rm.squat||""; $("rm-dead").value=state.rm.dead||"";
+  renderPeople(); renderBackupInfo();
 }
 
 /* ---------- Storage ---------- */
-function sessionsRef(){ return db.doc("data/users/"+uid+"/profile").collection("sessions"); }
-function profileRef(){ return db.doc("data/users/"+uid+"/profile"); }
-
-function persistSettings(){
-  var s={units:state.units,rm:state.rm};
-  lsSet("ll:settings",s);
-  if(mode==="db") return profileRef().set({settings:s}).catch(function(){ toast("Couldn’t sync settings; saved on this device"); });
-  return Promise.resolve();
-}
-function addSession(s){
-  state.sessions.push(s);
-  lsSet("ll:sessions",state.sessions);
-  if(mode==="db") return sessionsRef().doc(s.id).set(s).catch(function(){ toast("Couldn’t sync; saved on this device"); });
-  return Promise.resolve();
-}
+function persistSettings(){ lsSet(pk("settings"),{units:state.units,rm:state.rm}); return Promise.resolve(); }
+function addSession(s){ state.sessions.push(s); lsSet(pk("sessions"),state.sessions); return Promise.resolve(); }
 function removeSession(id){
   state.sessions=state.sessions.filter(function(x){ return x.id!==id; });
-  lsSet("ll:sessions",state.sessions);
-  if(mode==="db") return sessionsRef().doc(id).delete().catch(function(){});
-  return Promise.resolve();
+  lsSet(pk("sessions"),state.sessions); return Promise.resolve();
 }
 
-function connectDb(){
-  if(!window.claude || !window.claude.use) return;
-  Promise.all([window.claude.use("db"), window.claude.use("user")]).then(function(r){
-    db=r[0]; var user=r[1];
-    if(!db || !user) return null;
-    return user.id().then(function(id){
-      if(!id) return null;
-      uid=id;
-      return Promise.all([profileRef().get(), sessionsRef().get()]);
+/* ---------- Profiles ---------- */
+function renderProfileMenu(){
+  var sel=$("profile"); sel.innerHTML="";
+  profiles.list.forEach(function(p){ var o=el("option",{value:p.id,text:p.name}); if(p.id===profiles.current) o.selected=true; sel.appendChild(o); });
+  sel.appendChild(el("option",{value:"__add",text:"+ Add person"}));
+}
+function switchProfile(id){
+  saveDraft();
+  profiles.current=id; saveProfiles(); loadCurrent(); renderAll();
+  var p=profiles.list.filter(function(x){ return x.id===id; })[0];
+  toast("Now logging for "+(p?p.name:"new person"));
+}
+function addProfile(name){
+  name=(name||"").trim();
+  if(!name){ toast("Type a name first"); return; }
+  var id=newId(); profiles.list.push({id:id,name:name}); saveProfiles(); switchProfile(id);
+}
+function renderPeople(){
+  var root=$("plist"); root.innerHTML="";
+  profiles.list.forEach(function(p){
+    var inp=el("input",{type:"text",value:p.name,"aria-label":"Name for "+p.name});
+    inp.addEventListener("change",function(){
+      var v=inp.value.trim(); if(!v){ inp.value=p.name; return; }
+      p.name=v; saveProfiles(); renderProfileMenu(); toast("Renamed to "+v);
     });
-  }).then(function(res){
-    if(!res) return;
-    mode="db";
-    $("sync").textContent="Synced to your account";
-    var prof=res[0], snap=res[1];
-    if(prof.exists && prof.data().settings){
-      var st=prof.data().settings; state.units=st.units||state.units; state.rm=st.rm||{};
-      lsSet("ll:settings",{units:state.units,rm:state.rm});
-    } else { persistSettings(); }
-    var remote=snap.docs.map(function(d){ return d.data(); });
-    var ids={}; remote.forEach(function(s){ ids[s.id]=1; });
-    var localOnly=state.sessions.filter(function(s){ return !ids[s.id]; });
-    state.sessions=remote.concat(localOnly);
-    lsSet("ll:sessions",state.sessions);
-    // upload any sessions logged before sync connected, one at a time
-    localOnly.reduce(function(p,s){ return p.then(function(){ return sessionsRef().doc(s.id).set(s).catch(function(){}); }); }, Promise.resolve());
-    renderAll();
-  }).catch(function(){ mode="local"; });
+    var row=el("div",{cls:"prow"},[inp]);
+    if(p.id===profiles.current) row.appendChild(el("span",{cls:"cur",text:"Lifting now"}));
+    if(profiles.list.length>1){
+      var del=el("button",{cls:"btn danger",text:"Remove"});
+      del.addEventListener("click",function(){
+        if(!confirm("Remove "+p.name+" and all of their logged sessions from this device? Export a backup first if you want to keep them.")) return;
+        try{
+          for(var i=localStorage.length-1;i>=0;i--){ var k=localStorage.key(i); if(k && k.indexOf("ll:p:"+p.id+":")===0) localStorage.removeItem(k); }
+        }catch(e){}
+        profiles.list=profiles.list.filter(function(x){ return x.id!==p.id; });
+        if(profiles.current===p.id){ profiles.current=profiles.list[0].id; loadCurrent(); }
+        saveProfiles(); renderAll(); toast(p.name+" removed");
+      });
+      row.appendChild(del);
+    }
+    root.appendChild(row);
+  });
+}
+
+/* ---------- Backup ---------- */
+function buildBackup(){
+  return {
+    app:"lift-log", version:2, exported:new Date().toISOString(),
+    profiles:profiles.list.map(function(p){
+      return { id:p.id, name:p.name,
+        settings:lsGet("ll:p:"+p.id+":settings",{units:"lb",rm:{}}),
+        sessions:lsGet("ll:p:"+p.id+":sessions",[]) };
+    })
+  };
+}
+function exportBackup(){
+  var data=JSON.stringify(buildBackup(),null,1);
+  var name="lift-log-backup-"+new Date().toISOString().slice(0,10)+".json";
+  var file=null;
+  try{ file=new File([data],name,{type:"application/json"}); }catch(e){}
+  if(file && navigator.canShare && navigator.canShare({files:[file]})){
+    navigator.share({files:[file],title:"Lift Log backup"}).then(function(){ toast("Backup exported"); }).catch(function(err){
+      if(err && err.name==="AbortError") return;
+      downloadBlob(data,name);
+    });
+    return;
+  }
+  downloadBlob(data,name);
+}
+function downloadBlob(data,name){
+  var url=URL.createObjectURL(new Blob([data],{type:"application/json"}));
+  var a=el("a",{href:url,download:name}); document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(function(){ URL.revokeObjectURL(url); },2000);
+  toast("Backup saved as "+name);
+}
+function importBackup(text){
+  var b;
+  try{ b=JSON.parse(text); }catch(e){ toast("That file isn’t a Lift Log backup"); return; }
+  var incoming=[];
+  if(b && b.app==="lift-log" && Array.isArray(b.profiles)) incoming=b.profiles;
+  else { toast("That file isn’t a Lift Log backup"); return; }
+  var added=0, people=0;
+  incoming.forEach(function(ip){
+    if(!ip || !Array.isArray(ip.sessions)) return;
+    // match by id first, then by name, otherwise create the person
+    var p=profiles.list.filter(function(x){ return x.id===ip.id; })[0] ||
+          profiles.list.filter(function(x){ return x.name.toLowerCase()===String(ip.name||"").toLowerCase(); })[0];
+    if(!p){ p={id:ip.id||newId(), name:ip.name||"Imported"}; profiles.list.push(p); people++;
+      if(ip.settings) lsSet("ll:p:"+p.id+":settings",ip.settings); }
+    var cur=lsGet("ll:p:"+p.id+":sessions",[]), ids={};
+    cur.forEach(function(s){ ids[s.id]=1; });
+    ip.sessions.forEach(function(s){ if(s && s.id && !ids[s.id]){ cur.push(s); ids[s.id]=1; added++; } });
+    lsSet("ll:p:"+p.id+":sessions",cur);
+  });
+  saveProfiles(); loadCurrent(); renderAll();
+  toast("Imported "+added+" session"+(added===1?"":"s")+(people?" and "+people+" new "+(people===1?"person":"people"):""));
+}
+function renderBackupInfo(){
+  var total=0;
+  profiles.list.forEach(function(p){ total+=lsGet("ll:p:"+p.id+":sessions",[]).length; });
+  $("backup-info").textContent=total+" saved session"+(total===1?"":"s")+" across "+profiles.list.length+" "+(profiles.list.length===1?"person":"people")+" on this device.";
 }
 
 /* ---------- Wiring ---------- */
@@ -446,14 +555,35 @@ function show(view){
   if(view==="settings") renderSettings();
   window.scrollTo(0,0);
 }
-function renderAll(){ renderPickers(); renderWorkout(); if(!$("view-history").hidden) renderHistory(); renderSettings(); }
+function renderAll(){ renderProfileMenu(); renderPickers(); renderWorkout(); if(!$("view-history").hidden) renderHistory(); renderSettings(); }
 
 $("tab-log").addEventListener("click",function(){ show("log"); });
 $("tab-history").addEventListener("click",function(){ show("history"); });
 $("tab-settings").addEventListener("click",function(){ show("settings"); });
 
-$("week").addEventListener("change",function(e){ saveDraft(); state.week=+e.target.value; lsSet("ll:pos",{week:state.week,day:state.day}); renderWorkout(); });
-$("day").addEventListener("change",function(e){ saveDraft(); state.day=+e.target.value; lsSet("ll:pos",{week:state.week,day:state.day}); renderWorkout(); });
+$("week").addEventListener("change",function(e){ saveDraft(); state.week=+e.target.value; savePos(); renderWorkout(); });
+$("day").addEventListener("change",function(e){ saveDraft(); state.day=+e.target.value; savePos(); renderWorkout(); });
+
+$("profile").addEventListener("change",function(e){
+  if(e.target.value==="__add"){
+    renderProfileMenu();
+    show("settings");
+    setTimeout(function(){ $("new-name").focus(); },50);
+    return;
+  }
+  switchProfile(e.target.value);
+});
+$("add-person").addEventListener("click",function(){ addProfile($("new-name").value); $("new-name").value=""; });
+$("new-name").addEventListener("keydown",function(e){ if(e.key==="Enter"){ addProfile($("new-name").value); $("new-name").value=""; } });
+$("export").addEventListener("click",exportBackup);
+$("import-btn").addEventListener("click",function(){ $("import-file").click(); });
+$("import-file").addEventListener("change",function(e){
+  var f=e.target.files && e.target.files[0]; if(!f) return;
+  var r=new FileReader();
+  r.onload=function(){ importBackup(String(r.result)); e.target.value=""; };
+  r.onerror=function(){ toast("Couldn’t read that file"); };
+  r.readAsText(f);
+});
 
 var draftTimer;
 $("workout").addEventListener("input",function(){
@@ -488,7 +618,6 @@ $("save-settings").addEventListener("click",function(){
 });
 
 renderAll();
-connectDb();
 })();
 </script>
 </body>
